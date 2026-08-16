@@ -14,6 +14,8 @@ type AnalysisResult = {
   artifacts?: Record<string, string>;
 };
 
+type ValidationErrors = Partial<Record<"files" | "background" | "purpose" | "groups" | "species" | "tissue" | "normalization" | "batch" | "annotation", string>>;
+
 const API_BASE = process.env.NEXT_PUBLIC_SCRNALYSIS_API || (typeof window !== "undefined" ? `http://${window.location.hostname}:8000` : "http://localhost:8000");
 
 const pipeline = [
@@ -83,11 +85,25 @@ export default function Home() {
   const [umapNeighbors, setUmapNeighbors] = useState(30);
   const [umapMinDist, setUmapMinDist] = useState(0.3);
   const [tsnePerplexity, setTsnePerplexity] = useState(30);
+  const [species, setSpecies] = useState("human");
+  const [tissue, setTissue] = useState("synovium");
+  const [normalization, setNormalization] = useState("log");
+  const [batchCorrection, setBatchCorrection] = useState("harmony");
   const [analysisBackground, setAnalysisBackground] = useState("");
   const [researchPurpose, setResearchPurpose] = useState("");
   const [comparisonGroups, setComparisonGroups] = useState("");
   const [annotationScope, setAnnotationScope] = useState("major_and_detail");
+  const [validationErrors, setValidationErrors] = useState<ValidationErrors>({});
   const points = useMemo(() => createPoints(), []);
+
+  const clearValidationError = (field: keyof ValidationErrors) => {
+    setValidationErrors((current) => {
+      if (!current[field]) return current;
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  };
 
   const chooseFiles = (files?: FileList | File[]) => {
     if (!files?.length) return;
@@ -96,6 +112,7 @@ export default function Home() {
     setAnalysisResult(null);
     setErrorMessage("");
     setActiveStep(0);
+    clearValidationError("files");
   };
 
   const onFileChange = (event: ChangeEvent<HTMLInputElement>) => chooseFiles(event.target.files ?? undefined);
@@ -123,8 +140,20 @@ export default function Home() {
   };
 
   const startAnalysis = async () => {
-    if (!selectedFiles.length) {
-      setErrorMessage("请先上传 10x 三个文件，或上传包含这三个文件的 zip 压缩包。");
+    const nextErrors: ValidationErrors = {};
+    if (!selectedFiles.length) nextErrors.files = "请先上传 10x 三个文件，或上传包含这三个文件的 zip 压缩包。";
+    if (!analysisBackground.trim()) nextErrors.background = "请填写研究背景。";
+    if (!researchPurpose.trim()) nextErrors.purpose = "请填写研究目的。";
+    if (!comparisonGroups.trim()) nextErrors.groups = "请填写比较分组；如果没有对照组，请填写“单组探索”。";
+    if (!species) nextErrors.species = "请选择物种。";
+    if (!tissue) nextErrors.tissue = "请选择组织。";
+    if (!normalization) nextErrors.normalization = "请选择标准化方法。";
+    if (!batchCorrection) nextErrors.batch = "请选择批次校正方式。";
+    if (!annotationScope) nextErrors.annotation = "请选择注释粒度。";
+    setValidationErrors(nextErrors);
+    if (Object.keys(nextErrors).length) {
+      setRunStatus("ready");
+      setErrorMessage("请先补充红色星号标记的必填信息。");
       return;
     }
     setActiveStep(0);
@@ -133,7 +162,7 @@ export default function Home() {
     setAnalysisResult(null);
     const formData = new FormData();
     selectedFiles.forEach((file) => formData.append("files", file, file.name));
-    formData.append("config", JSON.stringify({ analysisBackground, researchPurpose, comparisonGroups, annotationScope, maxMito, minGenes, maxCounts, minCellsPerGene, maxRibo, doubletMethod, ambientMethod, dims, resolution, neighbors, umapNeighbors, umapMinDist, tsnePerplexity }));
+    formData.append("config", JSON.stringify({ species, tissue, normalization, batchCorrection, analysisBackground, researchPurpose, comparisonGroups, annotationScope, maxMito, minGenes, maxCounts, minCellsPerGene, maxRibo, doubletMethod, ambientMethod, dims, resolution, neighbors, umapNeighbors, umapMinDist, tsnePerplexity }));
     try {
       const response = await fetch(`${API_BASE}/api/jobs`, { method: "POST", body: formData });
       const body = await response.json();
@@ -197,30 +226,31 @@ export default function Home() {
           <div className="workspace-grid">
             <div className="left-column">
               <section className="card upload-card">
-                <div className="card-title-row"><div><span className="section-kicker">STEP 01</span><h2>上传数据</h2></div><span className="soft-tag">支持 10x Matrix Market</span></div>
-                <div className={`dropzone ${selectedFiles.length ? "has-file" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && fileInput.current?.click()}>
+                <div className="card-title-row"><div><span className="section-kicker">STEP 01</span><h2>上传数据 <em className="required-mark" aria-hidden="true">*</em></h2></div><span className="soft-tag">支持 10x Matrix Market</span></div>
+                <div className={`dropzone ${selectedFiles.length ? "has-file" : ""} ${validationErrors.files ? "invalid" : ""}`} onClick={() => fileInput.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={onDrop} role="button" tabIndex={0} aria-invalid={Boolean(validationErrors.files)} onKeyDown={(event) => event.key === "Enter" && fileInput.current?.click()}>
                   <input ref={fileInput} type="file" hidden multiple accept=".zip,.gz,.mtx,.tsv" onChange={onFileChange} />
                   <div className="upload-icon">↥</div>
                   {selectedFiles.length ? <><strong>{selectedFiles.length === 1 ? selectedFiles[0].name : `已选择 ${selectedFiles.length} 个文件`}</strong><span>{(selectedFiles.reduce((total, file) => total + file.size, 0) / 1024 / 1024).toFixed(2)} MB · 已准备分析</span><button className="text-button" onClick={(event) => { event.stopPropagation(); setSelectedFiles([]); setAnalysisResult(null); setRunStatus("ready"); }}>移除文件</button></> : <><strong>拖放 10x 文件到这里，或点击上传</strong><span>支持 zip 压缩包，或同时选择 matrix / barcodes / features 三个文件</span><button className="upload-button" onClick={(event) => { event.stopPropagation(); fileInput.current?.click(); }}>选择文件</button></>}
                 </div>
+                {validationErrors.files && <div className="field-error upload-error" role="alert">{validationErrors.files}</div>}
                 <div className="upload-footnote"><span className="lock">⌑</span> 文件会发送到运行 Scrnalysis 的这台电脑，只用于本次分析。</div>
               </section>
 
               <section className="card context-card">
                 <div className="card-title-row"><div><span className="section-kicker">STEP 02 · PROJECT CONTEXT</span><h2>分析背景与目的</h2></div><span className="soft-tag">帮助 AI 理解方向</span></div>
-                <label className="context-field"><span>研究背景</span><textarea value={analysisBackground} onChange={(event) => setAnalysisBackground(event.target.value)} placeholder="例如：本项目来自类风湿关节炎滑膜组织，关注免疫细胞与基质细胞的组成变化。" rows={3} /></label>
-                <label className="context-field"><span>研究目的</span><textarea value={researchPurpose} onChange={(event) => setResearchPurpose(event.target.value)} placeholder="例如：比较疾病组与对照组的细胞比例、亚群状态和差异表达。" rows={3} /></label>
-                <div className="context-inline"><label className="context-field"><span>比较分组</span><input value={comparisonGroups} onChange={(event) => setComparisonGroups(event.target.value)} placeholder="例如：RA vs Control" /></label><label className="context-field"><span>注释粒度</span><select value={annotationScope} onChange={(event) => setAnnotationScope(event.target.value)}><option value="major_and_detail">主要类型 + 细分亚群</option><option value="major">仅主要细胞类型</option><option value="detail">尽可能细的亚群</option></select></label></div>
+                <label className={`context-field ${validationErrors.background ? "has-error" : ""}`}><span>研究背景 <em className="required-mark" aria-hidden="true">*</em></span><textarea value={analysisBackground} aria-invalid={Boolean(validationErrors.background)} aria-describedby={validationErrors.background ? "background-error" : undefined} onChange={(event) => { setAnalysisBackground(event.target.value); clearValidationError("background"); }} placeholder="例如：本项目来自类风湿关节炎滑膜组织，关注免疫细胞与基质细胞的组成变化。" rows={3} />{validationErrors.background && <small id="background-error" className="field-error" role="alert">{validationErrors.background}</small>}</label>
+                <label className={`context-field ${validationErrors.purpose ? "has-error" : ""}`}><span>研究目的 <em className="required-mark" aria-hidden="true">*</em></span><textarea value={researchPurpose} aria-invalid={Boolean(validationErrors.purpose)} aria-describedby={validationErrors.purpose ? "purpose-error" : undefined} onChange={(event) => { setResearchPurpose(event.target.value); clearValidationError("purpose"); }} placeholder="例如：比较疾病组与对照组的细胞比例、亚群状态和差异表达。" rows={3} />{validationErrors.purpose && <small id="purpose-error" className="field-error" role="alert">{validationErrors.purpose}</small>}</label>
+                <div className="context-inline"><label className={`context-field ${validationErrors.groups ? "has-error" : ""}`}><span>比较分组 <em className="required-mark" aria-hidden="true">*</em></span><input value={comparisonGroups} aria-invalid={Boolean(validationErrors.groups)} aria-describedby={validationErrors.groups ? "groups-error" : undefined} onChange={(event) => { setComparisonGroups(event.target.value); clearValidationError("groups"); }} placeholder="例如：RA vs Control；无对照可填：单组探索" />{validationErrors.groups && <small id="groups-error" className="field-error" role="alert">{validationErrors.groups}</small>}</label><label className={`context-field ${validationErrors.annotation ? "has-error" : ""}`}><span>注释粒度 <em className="required-mark" aria-hidden="true">*</em></span><select value={annotationScope} aria-invalid={Boolean(validationErrors.annotation)} onChange={(event) => { setAnnotationScope(event.target.value); clearValidationError("annotation"); }}><option value="major_and_detail">主要类型 + 细分亚群</option><option value="major">仅主要细胞类型</option><option value="detail">尽可能细的亚群</option></select>{validationErrors.annotation && <small className="field-error" role="alert">{validationErrors.annotation}</small>}</label></div>
                 <div className="context-note"><span>✦</span> 这些信息会写入本次分析的运行记录，帮助 AI 选择 marker、解释异常群体，并避免脱离研究问题自动改参数。</div>
               </section>
 
               <section className="card parameters-card">
                 <div className="card-title-row"><div><span className="section-kicker">STEP 03</span><h2>分析参数</h2></div><button className={`advanced-toggle ${showAdvanced ? "open" : ""}`} onClick={() => setShowAdvanced(!showAdvanced)}>高级参数 <span>⌄</span></button></div>
                 <div className="parameter-grid">
-                  <label><span>物种</span><select defaultValue="human"><option value="human">Human / 人</option><option value="mouse">Mouse / 小鼠</option></select></label>
-                  <label><span>组织</span><select defaultValue="synovium"><option value="synovium">Synovium / 滑膜</option><option value="pbmc">PBMC</option><option value="lung">Lung / 肺</option></select></label>
-                  <label><span>标准化方法</span><select defaultValue="log"><option value="log">LogNormalize</option><option value="sct">SCTransform</option></select></label>
-                  <label><span>批次校正</span><select defaultValue="harmony"><option value="harmony">Harmony</option><option value="anchors">Seurat anchors</option><option value="none">不进行整合</option></select></label>
+                  <label className={validationErrors.species ? "has-error" : ""}><span>物种 <em className="required-mark" aria-hidden="true">*</em></span><select value={species} onChange={(event) => { setSpecies(event.target.value); clearValidationError("species"); }}><option value="human">Human / 人</option><option value="mouse">Mouse / 小鼠</option></select>{validationErrors.species && <small className="field-error" role="alert">{validationErrors.species}</small>}</label>
+                  <label className={validationErrors.tissue ? "has-error" : ""}><span>组织 <em className="required-mark" aria-hidden="true">*</em></span><select value={tissue} onChange={(event) => { setTissue(event.target.value); clearValidationError("tissue"); }}><option value="synovium">Synovium / 滑膜</option><option value="pbmc">PBMC</option><option value="lung">Lung / 肺</option></select>{validationErrors.tissue && <small className="field-error" role="alert">{validationErrors.tissue}</small>}</label>
+                  <label className={validationErrors.normalization ? "has-error" : ""}><span>标准化方法 <em className="required-mark" aria-hidden="true">*</em></span><select value={normalization} onChange={(event) => { setNormalization(event.target.value); clearValidationError("normalization"); }}><option value="log">LogNormalize</option><option value="sct">SCTransform</option></select>{validationErrors.normalization && <small className="field-error" role="alert">{validationErrors.normalization}</small>}</label>
+                  <label className={validationErrors.batch ? "has-error" : ""}><span>批次校正 <em className="required-mark" aria-hidden="true">*</em></span><select value={batchCorrection} onChange={(event) => { setBatchCorrection(event.target.value); clearValidationError("batch"); }}><option value="harmony">Harmony</option><option value="anchors">Seurat anchors</option><option value="none">不进行整合</option></select>{validationErrors.batch && <small className="field-error" role="alert">{validationErrors.batch}</small>}</label>
                 </div>
                 {showAdvanced && <div className="advanced-panel">
                   <div className="advanced-section full-span"><div className="advanced-heading"><strong>QC 与质量控制</strong><span>按样本记录阈值与过滤前后细胞数</span></div><div className="advanced-controls"><label><span>线粒体比例上限</span><div className="number-row"><input type="number" min="5" max="40" step="1" value={maxMito} onChange={(event) => setMaxMito(Number(event.target.value))} /><small>%</small></div></label><label><span>最少基因数</span><div className="number-row"><input type="number" min="50" max="1000" step="50" value={minGenes} onChange={(event) => setMinGenes(Number(event.target.value))} /><small>genes</small></div></label><label><span>最多 UMI 数</span><div className="number-row"><input type="number" min="5000" max="100000" step="500" value={maxCounts} onChange={(event) => setMaxCounts(Number(event.target.value))} /><small>UMIs</small></div></label><label><span>核糖体比例上限</span><div className="number-row"><input type="number" min="5" max="60" step="1" value={maxRibo} onChange={(event) => setMaxRibo(Number(event.target.value))} /><small>%</small></div></label><label><span>基因最低出现细胞数</span><div className="number-row"><input type="number" min="1" max="10" step="1" value={minCellsPerGene} onChange={(event) => setMinCellsPerGene(Number(event.target.value))} /><small>cells</small></div></label></div></div>
