@@ -38,3 +38,18 @@ button { cursor: pointer; }
 .dropzone.invalid { border-color: #d97878; background: #fff8f8; }
 .context-field.has-error textarea, .context-field.has-error input, .context-field.has-error select, .parameter-grid label.has-error select { border-color: #df8d8d; background: #fffafa; }
 
+/* Keep the long comparison field and annotation choice readable in narrow external browsers. */
+.context-inline { grid-template-columns: 1fr; }
+
+/* The original compact QC row is retained for compatibility but replaced by the explicit controls below. */
+.advanced-panel > .advanced-section:nth-child(2) { display: none; }
+.qc-rule-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.qc-rule-card { display: grid; gap: 10px; padding: 12px; border: 1px solid #e6eee8; border-radius: 8px; background: #fff; }
+.qc-rule-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.qc-rule-head strong { color: #5f776e; font-size: 11px; }
+.qc-rule-head span { color: #a0aea7; font-size: 9px; text-align: right; }
+.qc-mode-field { display: grid; gap: 7px; }
+.qc-mode-field select, .qc-rule-card select { width: 100%; border: 1px solid #dce6df; color: #62746d; background: #fff; border-radius: 7px; padding: 9px 8px; font-size: 11px; outline: none; }
+.qc-input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.qc-disabled-note { padding: 9px; border-radius: 7px; background: #f5f8f5; color: #9aa9a1; font-size: 10px; line-height: 1.45; }
+@media (max-width: 760px) { .qc-rule-grid, .qc-input-grid { grid-template-columns: 1fr; } }

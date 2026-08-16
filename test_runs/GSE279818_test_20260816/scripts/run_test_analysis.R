@@ -14,11 +14,27 @@ num_arg <- function(name, default) {
 run_dir <- normalizePath(arg_value("--run-dir", "D:/ResearchPro/scrnalysis/test_runs/GSE279818_test_20260816_actual"), mustWork = FALSE)
 raw_dir <- normalizePath(arg_value("--raw-dir", "D:/ResearchPro/scrnalysis/testdata/GSE279818_RAW"), mustWork = TRUE)
 dataset_id <- arg_value("--dataset-id", "GSE279818_RAW")
-min_features <- num_arg("--min-genes", 200)
-max_features <- num_arg("--max-genes", 6000)
-max_counts <- num_arg("--max-counts", Inf)
+species_requested <- arg_value("--species", "human")
+tissue_requested <- arg_value("--tissue", "synovium")
+normalization_requested <- arg_value("--normalization", "log")
+batch_correction_requested <- arg_value("--batch-correction", "harmony")
+gene_filter_mode <- tolower(arg_value("--gene-filter-mode", "quantile"))
+gene_lower_quantile <- num_arg("--gene-lower-quantile", 0.025)
+gene_upper_quantile <- num_arg("--gene-upper-quantile", 0.025)
+min_features_fixed <- num_arg("--min-genes", 200)
+max_features_fixed <- num_arg("--max-genes", 6000)
+umi_filter_mode <- tolower(arg_value("--umi-filter-mode", "quantile"))
+umi_lower_quantile <- num_arg("--umi-lower-quantile", 0.025)
+umi_upper_quantile <- num_arg("--umi-upper-quantile", 0.025)
+min_counts_fixed <- num_arg("--min-counts", 0)
+max_counts_fixed <- num_arg("--max-counts", Inf)
+mito_filter_mode <- tolower(arg_value("--mito-filter-mode", "fixed"))
 max_mito <- num_arg("--max-mito", 20)
-max_ribo <- num_arg("--max-ribo", Inf)
+ribo_filter_mode <- tolower(arg_value("--ribo-filter-mode", "none"))
+max_ribo <- num_arg("--max-ribo", 30)
+hb_filter_mode <- tolower(arg_value("--hb-filter-mode", "none"))
+max_hb <- num_arg("--max-hb", 20)
+min_cells_per_gene_mode <- tolower(arg_value("--min-cells-per-gene-mode", "fixed"))
 min_cells_per_gene <- num_arg("--min-cells-per-gene", 3)
 dims_requested <- num_arg("--dims", 20)
 resolution_requested <- num_arg("--resolution", 0.6)
@@ -28,6 +44,20 @@ umap_min_dist_requested <- num_arg("--umap-min-dist", 0.3)
 tsne_perplexity_requested <- num_arg("--tsne-perplexity", 30)
 doublet_method <- arg_value("--doublet-method", "scDblFinder")
 ambient_method <- arg_value("--ambient-method", "diagnostic_only")
+
+tail_quantile <- function(values, tail_probability, upper = FALSE) {
+  values <- values[is.finite(values)]
+  if (!length(values) || !is.finite(tail_probability)) return(if (upper) Inf else -Inf)
+  tail_probability <- max(0, min(0.49, tail_probability))
+  probability <- if (upper) 1 - tail_probability else tail_probability
+  as.numeric(stats::quantile(values, probs = probability, na.rm = TRUE, names = FALSE, type = 7))
+}
+resolve_lower_bound <- function(mode, fixed, values, tail_probability) {
+  if (mode == "none") -Inf else if (mode == "quantile") tail_quantile(values, tail_probability, upper = FALSE) else fixed
+}
+resolve_upper_bound <- function(mode, fixed, values, tail_probability) {
+  if (mode == "none") Inf else if (mode == "quantile") tail_quantile(values, tail_probability, upper = TRUE) else fixed
+}
 fig_dir <- file.path(run_dir, "results", "figures")
 table_dir <- file.path(run_dir, "results", "tables")
 object_dir <- file.path(run_dir, "results", "objects")
@@ -98,12 +128,12 @@ say("Loaded features=", nrow(counts), ", cells=", ncol(counts), ", nonzero=", le
 obj <- Seurat::CreateSeuratObject(
   counts = counts,
   project = dataset_id,
-  min.cells = min_cells_per_gene,
+  min.cells = if (min_cells_per_gene_mode == "none") 0 else min_cells_per_gene,
   min.features = 0
 )
 obj$sample_id <- "GSE279818_RAW"
-obj$species <- "human_inferred"
-obj$tissue <- "unknown"
+obj$species <- species_requested
+obj$tissue <- tissue_requested
 obj$condition <- "unknown"
 
 say("STEP 2/9 Calculate technical QC metrics")
@@ -112,14 +142,22 @@ obj[["percent.ribo"]] <- Seurat::PercentageFeatureSet(obj, pattern = "^(RPS|RPL)
 obj[["percent.hb"]] <- Seurat::PercentageFeatureSet(obj, pattern = "^HB")
 meta_before <- obj[[]]
 meta_before$cell_id <- rownames(meta_before)
-meta_before$pass_qc <- with(meta_before, nFeature_RNA >= min_features & nFeature_RNA <= max_features & nCount_RNA <= max_counts & percent.mt <= max_mito & percent.ribo <= max_ribo)
+resolved_min_features <- resolve_lower_bound(gene_filter_mode, min_features_fixed, meta_before$nFeature_RNA, gene_lower_quantile)
+resolved_max_features <- resolve_upper_bound(gene_filter_mode, max_features_fixed, meta_before$nFeature_RNA, gene_upper_quantile)
+resolved_min_counts <- resolve_lower_bound(umi_filter_mode, min_counts_fixed, meta_before$nCount_RNA, umi_lower_quantile)
+resolved_max_counts <- resolve_upper_bound(umi_filter_mode, max_counts_fixed, meta_before$nCount_RNA, umi_upper_quantile)
+resolved_max_mito <- if (mito_filter_mode == "none") Inf else max_mito
+resolved_max_ribo <- if (ribo_filter_mode == "none") Inf else max_ribo
+resolved_max_hb <- if (hb_filter_mode == "none") Inf else max_hb
+meta_before$pass_qc <- meta_before$nFeature_RNA >= resolved_min_features & meta_before$nFeature_RNA <= resolved_max_features & meta_before$nCount_RNA >= resolved_min_counts & meta_before$nCount_RNA <= resolved_max_counts & meta_before$percent.mt <= resolved_max_mito & meta_before$percent.ribo <= resolved_max_ribo & meta_before$percent.hb <= resolved_max_hb
+meta_before$pass_qc[is.na(meta_before$pass_qc)] <- FALSE
 qc_summary <- tibble::tibble(
-  metric = c("cells_before_qc", "cells_after_qc", "genes_in_matrix", "median_genes_before", "median_umi_before", "median_mito_percent_before", "median_genes_after", "median_umi_after", "median_mito_percent_after", "qc_min_features", "qc_max_features", "qc_max_mito_percent"),
+  metric = c("cells_before_qc", "cells_after_qc", "genes_in_matrix", "median_genes_before", "median_umi_before", "median_mito_percent_before", "median_genes_after", "median_umi_after", "median_mito_percent_after", "qc_gene_filter_mode", "qc_min_features", "qc_max_features", "qc_umi_filter_mode", "qc_min_umi", "qc_max_umi", "qc_mito_filter_mode", "qc_max_mito_percent", "qc_ribo_filter_mode", "qc_max_ribo_percent", "qc_hb_filter_mode", "qc_max_hb_percent", "qc_min_cells_per_gene_mode", "qc_min_cells_per_gene"),
   value = c(
     nrow(meta_before), sum(meta_before$pass_qc), nrow(obj),
     stats::median(meta_before$nFeature_RNA), stats::median(meta_before$nCount_RNA), stats::median(meta_before$percent.mt),
     stats::median(meta_before$nFeature_RNA[meta_before$pass_qc]), stats::median(meta_before$nCount_RNA[meta_before$pass_qc]), stats::median(meta_before$percent.mt[meta_before$pass_qc]),
-    min_features, max_features, max_mito
+    gene_filter_mode, resolved_min_features, resolved_max_features, umi_filter_mode, resolved_min_counts, resolved_max_counts, mito_filter_mode, resolved_max_mito, ribo_filter_mode, resolved_max_ribo, hb_filter_mode, resolved_max_hb, min_cells_per_gene_mode, min_cells_per_gene
   )
 )
 write_csv_base(qc_summary, file.path(table_dir, "qc_summary.csv"))
@@ -128,13 +166,13 @@ write_csv_base(meta_before, file.path(table_dir, "cell_metadata_before_qc.csv"))
 qc_plot <- ggplot2::ggplot(meta_before, ggplot2::aes(x = nFeature_RNA, y = nCount_RNA, color = percent.mt)) +
   ggplot2::geom_point(size = 0.55, alpha = 0.65) +
   ggplot2::scale_color_viridis_c(option = "C") +
-  ggplot2::geom_vline(xintercept = c(min_features, max_features), linetype = "dashed", color = "#C2410C") +
+  ggplot2::geom_vline(xintercept = c(resolved_min_features, resolved_max_features)[is.finite(c(resolved_min_features, resolved_max_features))], linetype = "dashed", color = "#C2410C") +
   ggplot2::labs(title = "QC before filtering", x = "Detected genes per cell", y = "UMI counts per cell", color = "Mitochondrial %") +
   ggplot2::theme_minimal(base_size = 12)
 save_plot(qc_plot, file.path(fig_dir, "qc_before_filtering.png"))
 
-say("STEP 3/9 Apply fixed exploratory QC thresholds")
-obj <- subset(obj, subset = nFeature_RNA >= min_features & nFeature_RNA <= max_features & nCount_RNA <= max_counts & percent.mt <= max_mito & percent.ribo <= max_ribo)
+say("STEP 3/9 Apply configured QC thresholds")
+obj <- subset(obj, subset = nFeature_RNA >= resolved_min_features & nFeature_RNA <= resolved_max_features & nCount_RNA >= resolved_min_counts & nCount_RNA <= resolved_max_counts & percent.mt <= resolved_max_mito & percent.ribo <= resolved_max_ribo & percent.hb <= resolved_max_hb)
 if (ncol(obj) < 50) stop("Fewer than 50 cells remained after QC; stop to avoid misleading downstream results")
 obj$pass_qc <- TRUE
 meta_after <- obj[[]]
@@ -199,7 +237,14 @@ ambient_table <- tibble::tibble(
 write_csv_base(ambient_table, file.path(table_dir, "ambient_rna_diagnostic.csv"))
 
 say("STEP 6/9 Normalize, find variable genes and run PCA")
-obj <- Seurat::NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+normalization_used <- "LogNormalize"
+if (tolower(normalization_requested) == "sct" && requireNamespace("sctransform", quietly = TRUE)) {
+  obj <- Seurat::SCTransform(obj, verbose = FALSE)
+  normalization_used <- "SCTransform"
+} else {
+  if (tolower(normalization_requested) == "sct") say("SCTransform requested but sctransform is unavailable; falling back to LogNormalize")
+  obj <- Seurat::NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+}
 obj <- Seurat::FindVariableFeatures(obj, selection.method = "vst", nfeatures = min(2000, nrow(obj)), verbose = FALSE)
 obj <- Seurat::ScaleData(obj, features = Seurat::VariableFeatures(obj), verbose = FALSE)
 max_pca_dims <- min(50, ncol(obj) - 1)
@@ -256,13 +301,13 @@ report_lines <- c(
   "## 本次运行结论",
   "",
   paste0("这是一份真实的 10x 单细胞矩阵测试。输入包含 ", nrow(counts), " 个基因和 ", ncol(counts), " 个细胞；QC 后保留 ", sum(meta_before$pass_qc), " 个细胞，去除疑似 doublet 后最终用于降维和聚类的细胞数为 ", ncol(obj), "。"),
-  "本次运行成功完成了技术质控、LogNormalize、PCA、邻居图、无监督聚类和 UMAP。",
+  paste0("本次运行完成了技术质控、", normalization_used, "、PCA、邻居图、无监督聚类和 UMAP。组织：", tissue_requested, "；物种：", species_requested, "；批次校正设置：", batch_correction_requested, "。"),
   "由于 testdata 没有组织、疾病/处理分组、供体信息或研究目的，本报告不把 cluster 编号直接解释为具体细胞类型。",
   "",
   "## 关键参数",
   "",
-  paste0("- QC：检测基因数 ", min_features, "–", max_features, "; UMI ≤", max_counts, "; 线粒体比例 ≤", max_mito, "%; 核糖体比例 ≤", max_ribo, "%"),
-  "- 归一化：LogNormalize，scale factor 10000",
+  paste0("- QC：基因数模式 ", gene_filter_mode, "（", resolved_min_features, "–", resolved_max_features, "）；UMI 模式 ", umi_filter_mode, "（", resolved_min_counts, "–", resolved_max_counts, "）；线粒体模式 ", mito_filter_mode, "（上限 ", resolved_max_mito, "）；核糖体模式 ", ribo_filter_mode, "（上限 ", resolved_max_ribo, "）；Hb 模式 ", hb_filter_mode, "（上限 ", resolved_max_hb, "）。"),
+  paste0("- 归一化：", normalization_used, "；scale factor 10000（如适用）"),
   paste0("- PCA：运行 ", npcs_to_run, " 个主成分；下游使用前 ", dims_use, " 个主成分"),
   paste0("- 聚类：resolution ", resolution_requested, "; k.param ", k_param_use),
   paste0("- UMAP：n.neighbors ", umap_neighbors_use, "; min.dist ", umap_min_dist_requested, "; seed 42"),
@@ -294,4 +339,3 @@ report_lines <- c(
 )
 writeLines(report_lines, file.path(report_dir, "final_analysis_report.md"), useBytes = TRUE)
 say("DONE UMAP and analysis outputs written to ", file.path(run_dir, "results"))
-
