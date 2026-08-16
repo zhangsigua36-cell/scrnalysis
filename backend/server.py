@@ -10,6 +10,7 @@ the same network.
 from __future__ import annotations
 
 import gzip
+import csv
 import json
 import mimetypes
 import os
@@ -165,13 +166,42 @@ def public_job(job_id: str) -> dict:
         base = f"/api/jobs/{job_id}/files/"
         job["artifacts"] = {
             "umap": base + "results/figures/umap_by_cluster.png",
+            "umapCelltype": base + "results/figures/umap_by_celltype.png",
+            "umapSample": base + "results/figures/umap_by_sample.png",
             "tsne": base + "results/figures/tsne_by_cluster.png",
+            "tsneCelltype": base + "results/figures/tsne_by_celltype.png",
+            "tsneSample": base + "results/figures/tsne_by_sample.png",
             "qc": base + "results/figures/qc_after_filtering.png",
+            "qcViolinBefore": base + "results/figures/qc_violin_before_filtering.png",
+            "qcViolinAfter": base + "results/figures/qc_violin_after_filtering.png",
+            "dotplot": base + "results/figures/dotplot_markers.png",
+            "featureplot": base + "results/figures/featureplot_markers.png",
             "report": base + "reports/final_analysis_report.md",
             "umapCoordinates": base + "results/tables/umap_coordinates.csv",
+            "tsneCoordinates": base + "results/tables/tsne_coordinates.csv",
             "markers": base + "results/tables/cluster_markers.csv",
+            "annotationEvidence": base + "results/tables/annotation_evidence.csv",
             "qcSummary": base + "results/tables/qc_summary.csv",
         }
+        evidence_path = Path(job["run_dir"]) / "results" / "tables" / "annotation_evidence.csv"
+        if evidence_path.exists():
+            with evidence_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            job["annotationRows"] = [
+                {
+                    "cluster": row.get("cluster", ""),
+                    "celltype_major": row.get("celltype_major", "Unassigned"),
+                    "markers": row.get("markers", ""),
+                    "score": float(row.get("score", 0) or 0),
+                    "confidence": row.get("confidence", "低"),
+                }
+                for row in rows
+            ]
+            labels = [row["celltype_major"] for row in job["annotationRows"] if row["celltype_major"] != "Unassigned"]
+            if labels:
+                job["insight"] = {"summary": f"本次分析识别出 {len(set(labels))} 类主要细胞类型建议；请结合 marker 证据、样本组成和研究背景复核低置信度 cluster。", "confidence": sum(row["score"] for row in job["annotationRows"]) / len(job["annotationRows"])}
+            else:
+                job["insight"] = {"summary": "本次运行没有生成足够的 marker 证据来给出细胞类型建议，请先检查 QC 后细胞数和基因命名格式。", "confidence": 0}
     return job
 
 
@@ -186,6 +216,8 @@ def run_analysis(job_id: str, run_dir: Path, input_dir: Path, config: dict) -> N
             "--run-dir", str(run_dir), "--raw-dir", str(input_dir), "--dataset-id", job_id,
             "--species", config["species"], "--tissue", config["tissue"],
             "--normalization", config["normalization"], "--batch-correction", config["batchCorrection"],
+            "--annotation-scope", config["annotationScope"], "--ai-annotation", config["aiAnnotation"], "--manual-edits", config["manualEdits"],
+            "--output-figures", ",".join(config["outputFigures"]),
             "--gene-filter-mode", config["geneFilterMode"], "--gene-lower-quantile", str(config["geneLowerQuantile"]),
             "--gene-upper-quantile", str(config["geneUpperQuantile"]), "--min-genes", str(config["minGenes"]), "--max-genes", str(config["maxGenes"]),
             "--umi-filter-mode", config["umiFilterMode"], "--umi-lower-quantile", str(config["umiLowerQuantile"]),
@@ -222,8 +254,8 @@ def run_analysis(job_id: str, run_dir: Path, input_dir: Path, config: dict) -> N
         if return_code != 0:
             update_job(job_id, status="error", progress=100, message="分析未完成，请查看错误信息", error=f"Rscript exit code {return_code}", finished_at=now())
             return
-        if not (run_dir / "results" / "figures" / "umap_by_cluster.png").exists():
-            update_job(job_id, status="error", progress=100, message="分析结束但没有找到 UMAP 图", error="UMAP output missing", finished_at=now())
+        if not (run_dir / "results" / "tables" / "umap_coordinates.csv").exists():
+            update_job(job_id, status="error", progress=100, message="分析结束但没有找到降维坐标", error="Embedding output missing", finished_at=now())
             return
         update_job(job_id, status="complete", progress=100, message="分析完成，已生成 UMAP 和结果文件", finished_at=now())
     except Exception as exc:  # keep the browser-facing service alive for later jobs
@@ -305,6 +337,10 @@ class Handler(BaseHTTPRequestHandler):
                 "analysisBackground": str(config.get("analysisBackground", "")),
                 "researchPurpose": str(config.get("researchPurpose", "")),
                 "comparisonGroups": str(config.get("comparisonGroups", "")),
+                "annotationScope": str(config.get("annotationScope", "major")),
+                "aiAnnotation": "true" if bool(config.get("aiAnnotationEnabled", True)) else "false",
+                "manualEdits": "true" if bool(config.get("manualEditsEnabled", True)) else "false",
+                "outputFigures": [str(value) for value in config.get("outputFigures", ["umap", "tsne", "dotplot", "featureplot", "qc_violin"])],
                 "species": str(config.get("species", "human")),
                 "tissue": str(config.get("tissue", "synovium")),
                 "normalization": str(config.get("normalization", "log")),

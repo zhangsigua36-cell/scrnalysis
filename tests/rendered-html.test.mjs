@@ -26,4 +26,3 @@ test("server-renders the Scrnalysis analysis workspace", async () => {
 assert.match(html, /上传数据后，这里会显示真实的 UMAP/);
   assert.doesNotMatch(html, /Your site is taking shape|react-loading-skeleton|codex-preview/);
 });
-

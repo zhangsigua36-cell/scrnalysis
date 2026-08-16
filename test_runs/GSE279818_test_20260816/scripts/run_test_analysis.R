@@ -18,6 +18,10 @@ species_requested <- arg_value("--species", "human")
 tissue_requested <- arg_value("--tissue", "synovium")
 normalization_requested <- arg_value("--normalization", "log")
 batch_correction_requested <- arg_value("--batch-correction", "harmony")
+annotation_scope <- arg_value("--annotation-scope", "major")
+ai_annotation_enabled <- tolower(arg_value("--ai-annotation", "true")) == "true"
+manual_edits_enabled <- tolower(arg_value("--manual-edits", "true")) == "true"
+output_figures <- unique(strsplit(arg_value("--output-figures", "umap,tsne,dotplot,featureplot,qc_violin"), ",", fixed = TRUE)[[1]])
 gene_filter_mode <- tolower(arg_value("--gene-filter-mode", "quantile"))
 gene_lower_quantile <- num_arg("--gene-lower-quantile", 0.025)
 gene_upper_quantile <- num_arg("--gene-upper-quantile", 0.025)
@@ -89,6 +93,7 @@ write_csv_base <- function(x, path, row.names = FALSE) {
 save_plot <- function(plot_obj, path, width = 9, height = 7, dpi = 160) {
   ggplot2::ggsave(path, plot = plot_obj, width = width, height = height, dpi = dpi, bg = "white")
 }
+figure_enabled <- function(name) name %in% output_figures
 
 say("START Scrnalysis real test analysis")
 say("Raw input is read-only for this run: ", raw_dir)
@@ -153,12 +158,12 @@ meta_before$pass_qc <- meta_before$nFeature_RNA >= resolved_min_features & meta_
 meta_before$pass_qc[is.na(meta_before$pass_qc)] <- FALSE
 qc_summary <- tibble::tibble(
   metric = c("cells_before_qc", "cells_after_qc", "genes_in_matrix", "median_genes_before", "median_umi_before", "median_mito_percent_before", "median_genes_after", "median_umi_after", "median_mito_percent_after", "qc_gene_filter_mode", "qc_min_features", "qc_max_features", "qc_umi_filter_mode", "qc_min_umi", "qc_max_umi", "qc_mito_filter_mode", "qc_max_mito_percent", "qc_ribo_filter_mode", "qc_max_ribo_percent", "qc_hb_filter_mode", "qc_max_hb_percent", "qc_min_cells_per_gene_mode", "qc_min_cells_per_gene"),
-  value = c(
+  value = as.character(c(
     nrow(meta_before), sum(meta_before$pass_qc), nrow(obj),
     stats::median(meta_before$nFeature_RNA), stats::median(meta_before$nCount_RNA), stats::median(meta_before$percent.mt),
     stats::median(meta_before$nFeature_RNA[meta_before$pass_qc]), stats::median(meta_before$nCount_RNA[meta_before$pass_qc]), stats::median(meta_before$percent.mt[meta_before$pass_qc]),
     gene_filter_mode, resolved_min_features, resolved_max_features, umi_filter_mode, resolved_min_counts, resolved_max_counts, mito_filter_mode, resolved_max_mito, ribo_filter_mode, resolved_max_ribo, hb_filter_mode, resolved_max_hb, min_cells_per_gene_mode, min_cells_per_gene
-  )
+  ))
 )
 write_csv_base(qc_summary, file.path(table_dir, "qc_summary.csv"))
 write_csv_base(meta_before, file.path(table_dir, "cell_metadata_before_qc.csv"))
@@ -169,7 +174,15 @@ qc_plot <- ggplot2::ggplot(meta_before, ggplot2::aes(x = nFeature_RNA, y = nCoun
   ggplot2::geom_vline(xintercept = c(resolved_min_features, resolved_max_features)[is.finite(c(resolved_min_features, resolved_max_features))], linetype = "dashed", color = "#C2410C") +
   ggplot2::labs(title = "QC before filtering", x = "Detected genes per cell", y = "UMI counts per cell", color = "Mitochondrial %") +
   ggplot2::theme_minimal(base_size = 12)
-save_plot(qc_plot, file.path(fig_dir, "qc_before_filtering.png"))
+if (figure_enabled("qc_violin")) {
+  qc_before_long <- rbind(
+    data.frame(value = meta_before$nFeature_RNA, metric = "nFeature_RNA"),
+    data.frame(value = meta_before$nCount_RNA, metric = "nCount_RNA"),
+    data.frame(value = meta_before$percent.mt, metric = "percent.mt")
+  )
+  qc_violin_before <- ggplot2::ggplot(qc_before_long, ggplot2::aes(x = metric, y = value, fill = metric)) + ggplot2::geom_violin(scale = "width", trim = TRUE) + ggplot2::geom_boxplot(width = 0.12, outlier.size = 0.25) + ggplot2::labs(title = "QC violin plots before filtering", x = NULL, y = "Value") + ggplot2::theme_minimal(base_size = 12) + ggplot2::theme(legend.position = "none")
+  save_plot(qc_violin_before, file.path(fig_dir, "qc_violin_before_filtering.png"), width = 9, height = 6)
+}
 
 say("STEP 3/9 Apply configured QC thresholds")
 obj <- subset(obj, subset = nFeature_RNA >= resolved_min_features & nFeature_RNA <= resolved_max_features & nCount_RNA >= resolved_min_counts & nCount_RNA <= resolved_max_counts & percent.mt <= resolved_max_mito & percent.ribo <= resolved_max_ribo & percent.hb <= resolved_max_hb)
@@ -185,6 +198,15 @@ qc_after_plot <- ggplot2::ggplot(meta_after, ggplot2::aes(x = nFeature_RNA, y = 
   ggplot2::labs(title = "QC after filtering", x = "Detected genes per cell", y = "UMI counts per cell", color = "Mitochondrial %") +
   ggplot2::theme_minimal(base_size = 12)
 save_plot(qc_after_plot, file.path(fig_dir, "qc_after_filtering.png"))
+if (figure_enabled("qc_violin")) {
+  qc_after_long <- rbind(
+    data.frame(value = meta_after$nFeature_RNA, metric = "nFeature_RNA"),
+    data.frame(value = meta_after$nCount_RNA, metric = "nCount_RNA"),
+    data.frame(value = meta_after$percent.mt, metric = "percent.mt")
+  )
+  qc_violin_after <- ggplot2::ggplot(qc_after_long, ggplot2::aes(x = metric, y = value, fill = metric)) + ggplot2::geom_violin(scale = "width", trim = TRUE) + ggplot2::geom_boxplot(width = 0.12, outlier.size = 0.25) + ggplot2::labs(title = "QC violin plots after filtering", x = NULL, y = "Value") + ggplot2::theme_minimal(base_size = 12) + ggplot2::theme(legend.position = "none")
+  save_plot(qc_violin_after, file.path(fig_dir, "qc_violin_after_filtering.png"), width = 9, height = 6)
+}
 
 say("STEP 4/9 Run doublet check when scDblFinder is available")
 doublet_status <- "not_run"
@@ -224,7 +246,7 @@ if (doublet_result) {
 meta_after_doublet <- obj[[]]
 meta_after_doublet$cell_id <- rownames(meta_after_doublet)
 write_csv_base(meta_after_doublet, file.path(table_dir, "cell_metadata_after_doublet.csv"))
-qc_summary <- dplyr::bind_rows(qc_summary, tibble::tibble(metric = "cells_after_doublet", value = ncol(obj)))
+qc_summary <- dplyr::bind_rows(qc_summary, tibble::tibble(metric = "cells_after_doublet", value = as.character(ncol(obj))))
 write_csv_base(qc_summary, file.path(table_dir, "qc_summary.csv"))
 write_csv_base(obj[[]] |> tibble::rownames_to_column("cell_id"), file.path(table_dir, "cell_metadata.csv"))
 
@@ -266,7 +288,7 @@ umap_df$cluster <- as.character(obj$seurat_clusters[umap_df$cell_id])
 umap_df$sample_id <- as.character(obj$sample_id[umap_df$cell_id])
 write_csv_base(umap_df, file.path(table_dir, "umap_coordinates.csv"))
 umap_plot <- Seurat::DimPlot(obj, reduction = "umap", group.by = "seurat_clusters", label = TRUE, repel = TRUE) + ggplot2::labs(title = "UMAP by unsupervised cluster", subtitle = "Exploratory run; clusters are not biological annotations")
-save_plot(umap_plot, file.path(fig_dir, "umap_by_cluster.png"), width = 9, height = 7)
+if (figure_enabled("umap")) save_plot(umap_plot, file.path(fig_dir, "umap_by_cluster.png"), width = 9, height = 7)
 
 say("STEP 8/9 Try t-SNE and export cluster markers")
 tsne_status <- "not_run"
@@ -277,7 +299,7 @@ try({
   tsne_df$cluster <- as.character(obj$seurat_clusters[tsne_df$cell_id])
   write_csv_base(tsne_df, file.path(table_dir, "tsne_coordinates.csv"))
   tsne_plot <- Seurat::DimPlot(obj, reduction = "tsne", group.by = "seurat_clusters", label = TRUE, repel = TRUE) + ggplot2::labs(title = "t-SNE by unsupervised cluster")
-  save_plot(tsne_plot, file.path(fig_dir, "tsne_by_cluster.png"), width = 9, height = 7)
+  if (figure_enabled("tsne")) save_plot(tsne_plot, file.path(fig_dir, "tsne_by_cluster.png"), width = 9, height = 7)
   tsne_status <- "completed"
 }, silent = TRUE)
 if (tsne_status != "completed") say("t-SNE was not produced; UMAP remains the primary embedding")
@@ -289,6 +311,72 @@ markers <- tryCatch({
   data.frame()
 })
 if (nrow(markers) > 0) write_csv_base(markers, file.path(table_dir, "cluster_markers.csv")) else write_csv_base(data.frame(), file.path(table_dir, "cluster_markers.csv"))
+
+say("STEP 8/9 Build marker-evidence annotation and requested plots")
+marker_sets <- list(
+  "T cells" = c("CD3D", "CD3E", "TRBC1", "IL7R", "LTB"),
+  "NK cells" = c("NKG7", "GNLY", "FCGR3A"),
+  "Myeloid" = c("LYZ", "LST1", "FCER1G", "CTSS"),
+  "B cells" = c("CD79A", "MS4A1", "CD74", "CD37"),
+  "Plasma cells" = c("MZB1", "JCHAIN", "SDC1"),
+  "Fibroblast / stromal" = c("COL1A1", "COL3A1", "DCN", "LUM"),
+  "Endothelial" = c("PECAM1", "VWF", "KDR"),
+  "Epithelial" = c("EPCAM", "KRT8", "KRT18", "KRT19")
+)
+annotation_evidence <- data.frame(cluster = character(), celltype_major = character(), markers = character(), score = numeric(), confidence = character(), stringsAsFactors = FALSE)
+cluster_labels <- setNames(rep("Unassigned", length(levels(obj$seurat_clusters))), levels(obj$seurat_clusters))
+if (ai_annotation_enabled) {
+  avg_expr <- tryCatch(Seurat::AverageExpression(obj, assays = DefaultAssay(obj), group.by = "seurat_clusters", slot = "data", verbose = FALSE)[[DefaultAssay(obj)]], error = function(e) NULL)
+  if (!is.null(avg_expr)) {
+    for (cluster in names(cluster_labels)) {
+      column <- which(colnames(avg_expr) %in% cluster)
+      if (!length(column)) column <- grep(paste0("(^|_)", cluster, "$"), colnames(avg_expr))
+      score_values <- vapply(marker_sets, function(genes) {
+        available <- intersect(genes, rownames(avg_expr))
+        if (!length(available) || !length(column)) 0 else mean(as.numeric(avg_expr[available, column, drop = TRUE]), na.rm = TRUE)
+      }, numeric(1))
+      best_name <- names(which.max(score_values))
+      best_score <- max(score_values, na.rm = TRUE)
+      second_score <- if (length(score_values) > 1) sort(score_values, decreasing = TRUE)[2] else 0
+      confidence_score <- min(0.99, max(0.05, 0.5 + (best_score - second_score) / (abs(best_score) + 1)))
+      confidence_label <- if (confidence_score >= 0.75) "高" else if (confidence_score >= 0.55) "中" else "低"
+      if (best_score > 0) cluster_labels[[cluster]] <- best_name
+      marker_rows_for_cluster <- if (nrow(markers) > 0 && "cluster" %in% colnames(markers)) markers[as.character(markers$cluster) == cluster, , drop = FALSE] else data.frame()
+      if (nrow(marker_rows_for_cluster) > 0 && "avg_log2FC" %in% colnames(marker_rows_for_cluster)) marker_rows_for_cluster <- marker_rows_for_cluster[order(marker_rows_for_cluster$avg_log2FC, decreasing = TRUE), , drop = FALSE]
+      evidence_genes <- if (nrow(marker_rows_for_cluster) > 0 && "gene" %in% colnames(marker_rows_for_cluster)) head(as.character(marker_rows_for_cluster$gene), 5) else character()
+      evidence_genes <- unique(c(evidence_genes, intersect(marker_sets[[best_name]], rownames(avg_expr))))
+      annotation_evidence <- rbind(annotation_evidence, data.frame(cluster = cluster, celltype_major = cluster_labels[[cluster]], markers = paste(head(evidence_genes, 8), collapse = ", "), score = round(confidence_score, 3), confidence = confidence_label, stringsAsFactors = FALSE))
+    }
+  }
+}
+if (!nrow(annotation_evidence)) annotation_evidence <- data.frame(cluster = names(cluster_labels), celltype_major = "Unassigned", markers = "", score = 0, confidence = "低", stringsAsFactors = FALSE)
+obj$celltype_major <- unname(cluster_labels[as.character(obj$seurat_clusters)])
+obj$celltype_detail <- if (annotation_scope == "major") obj$celltype_major else obj$celltype_major
+write_csv_base(annotation_evidence, file.path(table_dir, "annotation_evidence.csv"))
+write_csv_base(obj[[]] |> tibble::rownames_to_column("cell_id"), file.path(table_dir, "cell_metadata.csv"))
+
+if (figure_enabled("umap")) {
+  umap_celltype <- Seurat::DimPlot(obj, reduction = "umap", group.by = "celltype_major", label = TRUE, repel = TRUE) + ggplot2::labs(title = "UMAP by marker-evidence cell type")
+  umap_sample <- Seurat::DimPlot(obj, reduction = "umap", group.by = "sample_id") + ggplot2::labs(title = "UMAP by sample")
+  save_plot(umap_celltype, file.path(fig_dir, "umap_by_celltype.png"), width = 9, height = 7)
+  save_plot(umap_sample, file.path(fig_dir, "umap_by_sample.png"), width = 9, height = 7)
+}
+if (figure_enabled("tsne") && tsne_status == "completed") {
+  tsne_celltype <- Seurat::DimPlot(obj, reduction = "tsne", group.by = "celltype_major", label = TRUE, repel = TRUE) + ggplot2::labs(title = "t-SNE by marker-evidence cell type")
+  tsne_sample <- Seurat::DimPlot(obj, reduction = "tsne", group.by = "sample_id") + ggplot2::labs(title = "t-SNE by sample")
+  save_plot(tsne_celltype, file.path(fig_dir, "tsne_by_celltype.png"), width = 9, height = 7)
+  save_plot(tsne_sample, file.path(fig_dir, "tsne_by_sample.png"), width = 9, height = 7)
+}
+available_features <- rownames(obj)
+canonical_features <- intersect(c("CD3D", "IL7R", "NKG7", "LYZ", "MS4A1", "COL1A1", "EPCAM", "HLA-DRA"), available_features)
+if (figure_enabled("dotplot") && length(canonical_features) >= 2) {
+  dotplot <- Seurat::DotPlot(obj, features = canonical_features, group.by = "celltype_major") + Seurat::RotatedAxis() + ggplot2::labs(title = "Canonical marker DotPlot")
+  save_plot(dotplot, file.path(fig_dir, "dotplot_markers.png"), width = 10, height = 7)
+}
+if (figure_enabled("featureplot") && length(canonical_features) >= 1) {
+  featureplot <- Seurat::FeaturePlot(obj, features = head(canonical_features, 4), reduction = "umap", combine = TRUE) + ggplot2::labs(title = "Canonical marker FeaturePlot")
+  save_plot(featureplot, file.path(fig_dir, "featureplot_markers.png"), width = 11, height = 8)
+}
 
 say("STEP 9/9 Save object and reports")
 saveRDS(obj, file.path(object_dir, "analysis_object.rds"), compress = TRUE)
@@ -314,6 +402,8 @@ report_lines <- c(
   paste0("- Doublet（", doublet_method, "）：", doublet_status, "; removed=", doublet_removed),
   paste0("- Ambient RNA：", ambient_status),
   paste0("- t-SNE：", tsne_status),
+  paste0("- 注释：AI 注释 ", ifelse(ai_annotation_enabled, "开启", "关闭"), "；手动修改入口 ", ifelse(manual_edits_enabled, "保留", "关闭"), "；注释粒度 ", annotation_scope),
+  paste0("- 输出图形：", paste(output_figures, collapse = ", ")), 
   "",
   "## QC 与聚类概览",
   "",

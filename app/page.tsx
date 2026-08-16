@@ -1,9 +1,36 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type RunStatus = "ready" | "running" | "complete" | "error";
 type ViewMode = "celltype" | "sample" | "cluster";
+type EmbeddingMode = "umap" | "tsne";
+type SidePanel = "workspace" | "runs" | "markers" | "files";
+type OutputFigure = "umap" | "tsne" | "dotplot" | "featureplot" | "qc_violin";
+
+type AnnotationRow = {
+  cluster: string;
+  celltype_major: string;
+  markers: string;
+  score: number;
+  confidence: string;
+};
+
+type MarkerDisplayRow = {
+  cluster: string;
+  label: string;
+  markers: string;
+  score: string;
+  confidence: string;
+};
+
+type RunRecord = {
+  job_id: string;
+  created_at: string;
+  status: RunStatus;
+  message: string;
+  files: string[];
+};
 
 type AnalysisResult = {
   job_id: string;
@@ -12,9 +39,11 @@ type AnalysisResult = {
   message: string;
   error?: string;
   artifacts?: Record<string, string>;
+  annotationRows?: AnnotationRow[];
+  insight?: { summary: string; confidence: number };
 };
 
-type ValidationErrors = Partial<Record<"files" | "background" | "purpose" | "groups" | "species" | "tissue" | "normalization" | "batch" | "annotation", string>>;
+type ValidationErrors = Partial<Record<"files" | "background" | "purpose" | "groups" | "species" | "tissue" | "normalization" | "batch" | "annotation" | "outputs", string>>;
 
 const API_BASE = process.env.NEXT_PUBLIC_SCRNALYSIS_API || (typeof window !== "undefined" ? `http://${window.location.hostname}:8000` : "http://localhost:8000");
 
@@ -23,6 +52,7 @@ const pipeline = [
   ["02", "背景与目的", "明确研究问题与比较分组"],
   ["03", "分析参数", "QC / 降维 / 整合参数"],
   ["04", "细胞注释", "marker 证据与 AI 建议"],
+  ["05", "输出文件", "选择需要保存的图形"],
 ] as const;
 
 const cellTypes = [
@@ -38,6 +68,17 @@ const markerRows = [
   ["Myeloid", "LYZ, FCER1G, CTSS", "0.91", "高"],
   ["B cells", "CD79A, MS4A1, CD37", "0.88", "高"],
   ["Stromal", "COL1A1, DCN, COL3A1", "0.82", "中"],
+];
+
+const markerLibrary = [
+  ["T cells", "CD3D, CD3E, TRBC1, IL7R, LTB"],
+  ["NK cells", "NKG7, GNLY, FCGR3A"],
+  ["Myeloid", "LYZ, LST1, FCER1G, CTSS"],
+  ["B cells", "CD79A, MS4A1, CD74, CD37"],
+  ["Plasma cells", "MZB1, JCHAIN, SDC1"],
+  ["Fibroblast / stromal", "COL1A1, COL3A1, DCN, LUM"],
+  ["Endothelial", "PECAM1, VWF, KDR"],
+  ["Epithelial", "EPCAM, KRT8, KRT18, KRT19"],
 ];
 
 function createPoints() {
@@ -71,6 +112,17 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState("");
   const [activeStep, setActiveStep] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>("celltype");
+  const [embeddingMode, setEmbeddingMode] = useState<EmbeddingMode>("umap");
+  const [sidePanel, setSidePanel] = useState<SidePanel>("workspace");
+  const [projects, setProjects] = useState(["RA_synovium_demo", "SLE_PBMC_01", "scRNA_exploration"]);
+  const [projectName, setProjectName] = useState("RA_synovium_demo");
+  const [runHistory, setRunHistory] = useState<RunRecord[]>([]);
+  const [savedFileNames, setSavedFileNames] = useState<string[]>([]);
+  const [markerQuery, setMarkerQuery] = useState("");
+  const [aiAnnotationEnabled, setAiAnnotationEnabled] = useState(true);
+  const [manualEditsEnabled, setManualEditsEnabled] = useState(true);
+  const [manualLabels, setManualLabels] = useState<Record<string, string>>({});
+  const [selectedOutputs, setSelectedOutputs] = useState<OutputFigure[]>(["umap", "tsne", "dotplot", "featureplot", "qc_violin"]);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [maxMito, setMaxMito] = useState(20);
   const [minGenes, setMinGenes] = useState(200);
@@ -109,6 +161,21 @@ export default function Home() {
   const [validationErrors, setValidationErrors] = useState<ValidationErrors>({});
   const points = useMemo(() => createPoints(), []);
 
+  useEffect(() => {
+    try {
+      const savedRuns = window.localStorage.getItem("scrnalysis.runHistory");
+      const savedProjects = window.localStorage.getItem("scrnalysis.projects");
+      const savedFiles = window.localStorage.getItem("scrnalysis.fileNames");
+      const savedLabels = window.localStorage.getItem("scrnalysis.manualLabels");
+      if (savedRuns) setRunHistory(JSON.parse(savedRuns) as RunRecord[]);
+      if (savedProjects) setProjects(JSON.parse(savedProjects) as string[]);
+      if (savedFiles) setSavedFileNames(JSON.parse(savedFiles) as string[]);
+      if (savedLabels) setManualLabels(JSON.parse(savedLabels) as Record<string, string>);
+    } catch {
+      // Local browser history is optional and should never block analysis.
+    }
+  }, []);
+
   const clearValidationError = (field: keyof ValidationErrors) => {
     setValidationErrors((current) => {
       if (!current[field]) return current;
@@ -125,6 +192,12 @@ export default function Home() {
     setAnalysisResult(null);
     setErrorMessage("");
     setActiveStep(0);
+    const names = Array.from(files).map((file) => file.name);
+    setSavedFileNames((current) => {
+      const next = Array.from(new Set([...names, ...current])).slice(0, 20);
+      window.localStorage.setItem("scrnalysis.fileNames", JSON.stringify(next));
+      return next;
+    });
     clearValidationError("files");
   };
 
@@ -138,10 +211,16 @@ export default function Home() {
     const response = await fetch(`${API_BASE}/api/jobs/${jobId}`);
     const job = (await response.json()) as AnalysisResult;
     setAnalysisResult(job);
-    setActiveStep(Math.min(pipeline.length - 1, Math.floor((job.progress || 0) / 25)));
+    setActiveStep(Math.min(pipeline.length - 1, Math.floor((job.progress || 0) / 20)));
     if (job.status === "complete") {
       setRunStatus("complete");
       setActiveStep(pipeline.length - 1);
+      const record: RunRecord = { job_id: job.job_id, created_at: new Date().toISOString(), status: job.status, message: job.message, files: selectedFiles.map((file) => file.name) };
+      setRunHistory((current) => {
+        const next = [record, ...current.filter((item) => item.job_id !== record.job_id)].slice(0, 20);
+        window.localStorage.setItem("scrnalysis.runHistory", JSON.stringify(next));
+        return next;
+      });
       return;
     }
     if (job.status === "error") {
@@ -163,6 +242,7 @@ export default function Home() {
     if (!normalization) nextErrors.normalization = "请选择标准化方法。";
     if (!batchCorrection) nextErrors.batch = "请选择批次校正方式。";
     if (!annotationScope) nextErrors.annotation = "请选择注释粒度。";
+    if (!selectedOutputs.length) nextErrors.outputs = "请至少选择一种输出图形。";
     setValidationErrors(nextErrors);
     if (Object.keys(nextErrors).length) {
       setRunStatus("ready");
@@ -175,7 +255,7 @@ export default function Home() {
     setAnalysisResult(null);
     const formData = new FormData();
     selectedFiles.forEach((file) => formData.append("files", file, file.name));
-    formData.append("config", JSON.stringify({ species, tissue, normalization, batchCorrection, analysisBackground, researchPurpose, comparisonGroups, annotationScope, mitoFilterMode, maxMito, geneFilterMode, geneLowerQuantile, geneUpperQuantile, minGenes, maxGenes, umiFilterMode, umiLowerQuantile, umiUpperQuantile, minCounts, maxCounts, riboFilterMode, maxRibo, hbFilterMode, maxHb, minCellsPerGeneMode, minCellsPerGene, doubletMethod, ambientMethod, dims, resolution, neighbors, umapNeighbors, umapMinDist, tsnePerplexity }));
+    formData.append("config", JSON.stringify({ species, tissue, normalization, batchCorrection, analysisBackground, researchPurpose, comparisonGroups, annotationScope, aiAnnotationEnabled, manualEditsEnabled, outputFigures: selectedOutputs, mitoFilterMode, maxMito, geneFilterMode, geneLowerQuantile, geneUpperQuantile, minGenes, maxGenes, umiFilterMode, umiLowerQuantile, umiUpperQuantile, minCounts, maxCounts, riboFilterMode, maxRibo, hbFilterMode, maxHb, minCellsPerGeneMode, minCellsPerGene, doubletMethod, ambientMethod, dims, resolution, neighbors, umapNeighbors, umapMinDist, tsnePerplexity }));
     try {
       const response = await fetch(`${API_BASE}/api/jobs`, { method: "POST", body: formData });
       const body = await response.json();
@@ -185,6 +265,31 @@ export default function Home() {
       setRunStatus("error");
       setErrorMessage(error instanceof Error ? error.message : "无法连接分析服务");
     }
+  };
+
+  const plotKey = embeddingMode === "tsne"
+    ? viewMode === "celltype" ? "tsneCelltype" : viewMode === "sample" ? "tsneSample" : "tsne"
+    : viewMode === "celltype" ? "umapCelltype" : viewMode === "sample" ? "umapSample" : "umap";
+  const plotEnabled = selectedOutputs.includes(embeddingMode);
+  const plotUrl = plotEnabled ? analysisResult?.artifacts?.[plotKey] : undefined;
+  const displayedMarkerRows: MarkerDisplayRow[] = analysisResult?.annotationRows?.length
+    ? analysisResult.annotationRows.map((row) => ({ cluster: row.cluster, label: manualLabels[row.cluster] || row.celltype_major, markers: row.markers, score: row.score.toFixed(2), confidence: row.confidence }))
+    : markerRows.map(([label, markers, score, confidence]) => ({ cluster: "", label, markers, score, confidence }));
+  const filteredMarkerLibrary = markerLibrary.filter(([name, genes]) => `${name} ${genes}`.toLowerCase().includes(markerQuery.toLowerCase()));
+  const toggleOutput = (output: OutputFigure) => setSelectedOutputs((current) => current.includes(output) ? current.filter((item) => item !== output) : [...current, output]);
+  const updateManualLabel = (cluster: string, label: string) => setManualLabels((current) => {
+    const next = { ...current, [cluster]: label };
+    window.localStorage.setItem("scrnalysis.manualLabels", JSON.stringify(next));
+    return next;
+  });
+  const selectPanel = (panel: SidePanel) => setSidePanel(panel);
+  const addProject = () => {
+    const name = window.prompt("请输入新项目名称", "新单细胞项目");
+    if (!name?.trim()) return;
+    const next = Array.from(new Set([name.trim(), ...projects]));
+    setProjects(next);
+    setProjectName(name.trim());
+    window.localStorage.setItem("scrnalysis.projects", JSON.stringify(next));
   };
 
   return (
@@ -200,18 +305,16 @@ export default function Home() {
 
         <div className="workspace-label">我的工作区</div>
         <nav className="side-nav" aria-label="主导航">
-          <button className="nav-item active"><span className="nav-icon">⌘</span>分析工作台</button>
-          <button className="nav-item"><span className="nav-icon">◷</span>运行记录 <span className="nav-count">3</span></button>
-          <button className="nav-item"><span className="nav-icon">⌁</span>Marker 库</button>
-          <button className="nav-item"><span className="nav-icon">▣</span>数据文件</button>
+          <button className={`nav-item ${sidePanel === "workspace" ? "active" : ""}`} onClick={() => selectPanel("workspace")}><span className="nav-icon">⌘</span>分析工作台</button>
+          <button className={`nav-item ${sidePanel === "runs" ? "active" : ""}`} onClick={() => selectPanel("runs")}><span className="nav-icon">◷</span>运行记录 <span className="nav-count">{runHistory.length}</span></button>
+          <button className={`nav-item ${sidePanel === "markers" ? "active" : ""}`} onClick={() => selectPanel("markers")}><span className="nav-icon">⌁</span>Marker 库</button>
+          <button className={`nav-item ${sidePanel === "files" ? "active" : ""}`} onClick={() => selectPanel("files")}><span className="nav-icon">▣</span>数据文件</button>
         </nav>
 
         <div className="sidebar-divider" />
-        <div className="workspace-label project-label">最近项目 <button className="tiny-add">+</button></div>
+        <div className="workspace-label project-label">最近项目 <button className="tiny-add" onClick={addProject} aria-label="新建项目">+</button></div>
         <div className="project-list">
-          <button className="project-item selected"><span className="project-dot green" /><span><strong>RA_synovium_demo</strong><small>刚刚更新</small></span></button>
-          <button className="project-item"><span className="project-dot blue" /><span><strong>SLE_PBMC_01</strong><small>昨天</small></span></button>
-          <button className="project-item"><span className="project-dot orange" /><span><strong>scRNA_exploration</strong><small>8 月 12 日</small></span></button>
+          {projects.map((project, index) => <button className={`project-item ${projectName === project ? "selected" : ""}`} key={project} onClick={() => setProjectName(project)}><span className={`project-dot ${index % 3 === 0 ? "green" : index % 3 === 1 ? "blue" : "orange"}`} /><span><strong>{project}</strong><small>{index === 0 ? "刚刚更新" : index === 1 ? "昨天" : "最近使用"}</small></span></button>)}
         </div>
 
         <div className="sidebar-bottom">
@@ -222,9 +325,16 @@ export default function Home() {
 
       <section className="main-content">
         <header className="topbar">
-          <div className="breadcrumbs"><span>工作区</span><b>/</b><strong>RA_synovium_demo</strong><span className="status-pill"><i /> 草稿</span></div>
-          <div className="top-actions"><button className="icon-button" aria-label="帮助">?</button><button className="icon-button" aria-label="通知">♧</button><button className="outline-button">保存项目</button><button className="primary-button compact" onClick={startAnalysis}>运行分析 <span>→</span></button></div>
+          <div className="breadcrumbs"><span>工作区</span><b>/</b><strong>{projectName}</strong><span className="status-pill"><i /> {runStatus === "complete" ? "已完成" : "草稿"}</span></div>
+          <div className="top-actions"><button className="icon-button" aria-label="帮助" onClick={() => window.alert("先上传 10x 三文件或 zip，再填写研究背景、研究目的和比较分组，然后点击开始分析。")}>?</button><button className="icon-button" aria-label="通知" onClick={() => selectPanel("runs")}>♧</button><button className="outline-button" onClick={() => window.localStorage.setItem("scrnalysis.projectDraft", JSON.stringify({ projectName, selectedFiles: selectedFiles.map((file) => file.name) }))}>保存项目</button><button className="primary-button compact" onClick={startAnalysis}>运行分析 <span>→</span></button></div>
         </header>
+
+        {sidePanel !== "workspace" && <aside className="workspace-drawer" aria-label="工作区面板">
+          <div className="drawer-head"><div><span className="section-kicker">WORKSPACE</span><h2>{sidePanel === "runs" ? "运行记录" : sidePanel === "markers" ? "Marker 库" : "数据文件"}</h2></div><button className="icon-button" onClick={() => selectPanel("workspace")} aria-label="关闭">×</button></div>
+          {sidePanel === "runs" && <div className="drawer-list">{runHistory.length ? runHistory.map((run) => <div className="drawer-item" key={run.job_id}><strong>{run.job_id}</strong><span>{run.status === "complete" ? "已完成" : run.status}</span><small>{run.files.join("、") || "未记录文件名"}</small>{run.status === "complete" && analysisResult?.job_id === run.job_id && <a href={`${API_BASE}${analysisResult.artifacts?.report || ""}`} target="_blank" rel="noreferrer">查看本次报告 →</a>}</div>) : <div className="drawer-empty">还没有完成的分析。完成一次真实分析后，记录会自动保存在这台浏览器中。</div>}</div>}
+          {sidePanel === "markers" && <div className="drawer-list"><input className="drawer-search" value={markerQuery} onChange={(event) => setMarkerQuery(event.target.value)} placeholder="搜索细胞类型或 marker" />{filteredMarkerLibrary.map(([name, genes]) => <div className="drawer-item" key={name}><strong>{name}</strong><small>{genes}</small></div>)}</div>}
+          {sidePanel === "files" && <div className="drawer-list">{selectedFiles.length > 0 && <div className="drawer-note">本次已选择 {selectedFiles.length} 个文件。</div>}{savedFileNames.length ? savedFileNames.map((name) => <div className="drawer-item" key={name}><strong>{name}</strong><small>浏览器记录的文件名；原始文件不会上传到云端列表。</small></div>) : <div className="drawer-empty">选择数据文件后，这里会显示最近使用过的文件名。</div>}</div>}
+        </aside>}
 
         <div className="content-wrap">
           <div className="page-heading">
@@ -283,24 +393,33 @@ export default function Home() {
 
               <section className="card annotation-card">
                 <div className="card-title-row"><div><span className="section-kicker">STEP 04</span><h2>注释策略</h2></div><span className="ready-tag"><i /> 可开始</span></div>
-                <div className="annotation-choice"><div className="choice-icon">✦</div><div><strong>AI 辅助注释</strong><p>结合 cluster markers、经典 marker 和组织背景生成建议。</p></div><span className="switch on"><i /></span></div>
-                <div className="annotation-choice"><div className="choice-icon manual">⌁</div><div><strong>保留手动修改</strong><p>你可以在 UMAP 结果页修改任意 cluster 的最终标签。</p></div><span className="switch on"><i /></span></div>
+                <div className="annotation-choice"><div className="choice-icon">✦</div><div><strong>AI 辅助注释</strong><p>运行时根据 cluster markers、经典 marker 和组织背景生成初步细胞类型建议。</p></div><button className={`switch ${aiAnnotationEnabled ? "on" : ""}`} aria-pressed={aiAnnotationEnabled} onClick={() => setAiAnnotationEnabled((value) => !value)}><i /></button></div>
+                <div className="annotation-choice"><div className="choice-icon manual">⌁</div><div><strong>保留手动修改</strong><p>保留 cluster 到细胞类型的修改入口，并在结果证据中记录原始建议。</p></div><button className={`switch ${manualEditsEnabled ? "on" : ""}`} aria-pressed={manualEditsEnabled} onClick={() => setManualEditsEnabled((value) => !value)}><i /></button></div>
+                <div className="annotation-status"><span>运行后会输出 cluster 注释建议、marker 证据和置信度。</span><strong>{aiAnnotationEnabled ? "AI 已开启" : "仅输出未注释 cluster"}</strong></div>
+              </section>
+
+              <section className={`card output-card ${validationErrors.outputs ? "has-output-error" : ""}`}>
+                <div className="card-title-row"><div><span className="section-kicker">STEP 05</span><h2>输出文件</h2></div><span className="soft-tag">可在运行前选择</span></div>
+                <p className="output-intro">勾选后，分析脚本会生成你选择的基础图形；坐标表、分析报告和 QC 汇总表会始终保留，便于复核。</p>
+                <div className="output-grid">{([ ["umap", "UMAP", "按细胞类型、样本和 cluster 输出"], ["tsne", "t-SNE", "输出 t-SNE 坐标和分组图"], ["dotplot", "DotPlot", "主要 marker 的表达比例和平均表达"], ["featureplot", "FeaturePlot", "经典 marker 的空间表达"], ["qc_violin", "QC violin plot", "nFeature、nCount、线粒体比例"], ] as const).map(([value, label, detail]) => <label className="output-option" key={value}><input type="checkbox" checked={selectedOutputs.includes(value)} onChange={() => toggleOutput(value)} /><span><strong>{label}</strong><small>{detail}</small></span></label>)}</div>
+                {validationErrors.outputs && <small className="field-error" role="alert">{validationErrors.outputs}</small>}
               </section>
             </div>
 
             <div className="right-column">
               <section className="card results-card">
-                <div className="card-title-row"><div><span className="section-kicker">LIVE PREVIEW</span><h2>结果预览</h2></div><span className={`run-tag ${runStatus}`}>{runStatus === "running" ? "分析中 · " + (activeStep + 1) + "/4" : runStatus === "complete" ? "已完成" : runStatus === "error" ? "需要处理" : "等待上传"}</span></div>
-                <div className="plot-toolbar"><div className="segmented"><button className={viewMode === "celltype" ? "selected" : ""} onClick={() => setViewMode("celltype")}>细胞类型</button><button className={viewMode === "sample" ? "selected" : ""} onClick={() => setViewMode("sample")}>样本</button><button className={viewMode === "cluster" ? "selected" : ""} onClick={() => setViewMode("cluster")}>Cluster</button></div><button className="plot-action">⤢ 放大</button></div>
-                <div className={`demo-note ${analysisResult?.status === "complete" ? "real-note" : ""}`}><span>{analysisResult?.status === "complete" ? "✓" : "ⓘ"}</span> {analysisResult?.status === "complete" ? "这是本次上传数据生成的真实 UMAP。Cluster 编号还不是细胞类型名称。" : "上传数据后，这里会显示真实的 UMAP；未上传时显示界面示例。"}</div>
-                {analysisResult?.artifacts?.umap ? <div className="real-plot-wrap"><img className="real-plot" src={`${API_BASE}${analysisResult.artifacts.umap}`} alt="本次单细胞分析生成的 UMAP 图" /></div> : <div className="plot-area"><div className="axis-label y">UMAP_2</div><div className="axis-label x">UMAP_1</div>{points.map((point, index) => <span key={index} className="plot-point" style={{ left: `${point.left}%`, top: `${point.top}%`, background: point.color, width: point.size, height: point.size }} />)}</div>}
-                <div className="plot-footer"><div className="legend">{analysisResult?.status === "complete" ? <span><i style={{ background: "#157c72" }} />真实 Cluster UMAP</span> : cellTypes.map((type) => <span key={type.name}><i style={{ background: type.color }} />{type.name}</span>)}</div><span className="plot-meta">{analysisResult?.status === "complete" ? <a href={`${API_BASE}${analysisResult.artifacts?.umapCoordinates || ""}`} target="_blank" rel="noreferrer">下载 UMAP 坐标</a> : "等待真实数据"}</span></div>
+                <div className="card-title-row"><div><span className="section-kicker">LIVE PREVIEW</span><h2>结果预览</h2></div><span className={`run-tag ${runStatus}`}>{runStatus === "running" ? "分析中 · " + (activeStep + 1) + "/5" : runStatus === "complete" ? "已完成" : runStatus === "error" ? "需要处理" : "等待上传"}</span></div>
+                <div className="plot-toolbar"><div className="segmented"><button className={embeddingMode === "umap" ? "selected" : ""} onClick={() => setEmbeddingMode("umap")}>UMAP</button><button className={embeddingMode === "tsne" ? "selected" : ""} onClick={() => setEmbeddingMode("tsne")}>t-SNE</button></div><div className="segmented"><button className={viewMode === "celltype" ? "selected" : ""} onClick={() => setViewMode("celltype")}>细胞类型</button><button className={viewMode === "sample" ? "selected" : ""} onClick={() => setViewMode("sample")}>样本</button><button className={viewMode === "cluster" ? "selected" : ""} onClick={() => setViewMode("cluster")}>Cluster</button></div><button className="plot-action" onClick={() => plotUrl && window.open(`${API_BASE}${plotUrl}`, "_blank", "noopener,noreferrer")}>⤢ 放大</button></div>
+                <div className={`demo-note ${analysisResult?.status === "complete" ? "real-note" : ""}`}><span>{analysisResult?.status === "complete" ? "✓" : "ⓘ"}</span> {analysisResult?.status === "complete" ? `这是本次上传数据生成的真实 ${embeddingMode.toUpperCase()}，当前按${viewMode === "celltype" ? "细胞类型" : viewMode === "sample" ? "样本" : "cluster"}着色。` : "上传数据后，这里会显示真实的 UMAP 或 t-SNE；未上传时显示界面示例。"}</div>
+                {plotUrl ? <div className="real-plot-wrap"><img className="real-plot" src={`${API_BASE}${plotUrl}`} alt={`本次单细胞分析生成的 ${embeddingMode} 图`} /></div> : <div className="plot-area"><div className="axis-label y">{embeddingMode === "umap" ? "UMAP_2" : "t-SNE_2"}</div><div className="axis-label x">{embeddingMode === "umap" ? "UMAP_1" : "t-SNE_1"}</div>{points.map((point, index) => <span key={index} className="plot-point" style={{ left: `${point.left}%`, top: `${point.top}%`, background: point.color, width: point.size, height: point.size }} />)}</div>}
+                <div className="plot-footer"><div className="legend">{analysisResult?.status === "complete" ? <span><i style={{ background: "#157c72" }} />真实 {embeddingMode.toUpperCase()}</span> : cellTypes.map((type) => <span key={type.name}><i style={{ background: type.color }} />{type.name}</span>)}</div><span className="plot-meta">{analysisResult?.status === "complete" ? <a href={`${API_BASE}${analysisResult.artifacts?.[embeddingMode === "umap" ? "umapCoordinates" : "tsneCoordinates"] || ""}`} target="_blank" rel="noreferrer">下载 {embeddingMode.toUpperCase()} 坐标</a> : "等待真实数据"}</span></div>
+                {analysisResult?.status === "complete" && <div className="result-downloads"><span>本次已生成：</span>{selectedOutputs.map((output) => { const artifact = output === "umap" ? "umap" : output === "tsne" ? "tsne" : output === "qc_violin" ? "qcViolinAfter" : output; const label = output === "qc_violin" ? "QC violin" : output === "featureplot" ? "FeaturePlot" : output === "dotplot" ? "DotPlot" : output.toUpperCase(); return <a key={output} href={`${API_BASE}${analysisResult.artifacts?.[artifact] || ""}`} target="_blank" rel="noreferrer">{label}</a>; })}<a href={`${API_BASE}${analysisResult.artifacts?.report || ""}`} target="_blank" rel="noreferrer">分析报告</a></div>}
                 {errorMessage && <div className="service-error">{errorMessage}</div>}
               </section>
 
-              <section className="card insight-card"><div className="insight-head"><span className="ai-orb small">✦</span><div><span className="section-kicker">AI INSIGHT</span><h2>初步观察</h2></div><button className="more-button">···</button></div><p>当前预览显示主要细胞群之间分离良好。建议下一步重点检查 <strong>Myeloid</strong> 亚群中的 LYZ / FCER1G 表达，以及是否存在双细胞。</p><div className="insight-bottom"><span><i className="confidence-dot" /> 置信度 86%</span><button>查看 marker 证据 →</button></div></section>
+              <section className="card insight-card"><div className="insight-head"><span className="ai-orb small">✦</span><div><span className="section-kicker">AI INSIGHT</span><h2>初步观察</h2></div><button className="more-button" onClick={() => selectPanel("runs")}>···</button></div><p>{analysisResult?.insight?.summary || "上传并完成分析后，这里会根据保留细胞数、cluster marker 和注释置信度生成本次运行的初步观察。"}</p><div className="insight-bottom"><span><i className="confidence-dot" /> 置信度 {analysisResult?.insight?.confidence ? `${Math.round(analysisResult.insight.confidence * 100)}%` : "待分析"}</span><button onClick={() => selectPanel("markers")}>查看 marker 证据 →</button></div></section>
 
-              <section className="card markers-card"><div className="card-title-row"><div><span className="section-kicker">ANNOTATION EVIDENCE</span><h2>注释证据</h2></div><button className="text-link">全部查看 →</button></div><div className="marker-table"><div className="marker-row header"><span>细胞类型</span><span>代表性 markers</span><span>评分</span><span /></div>{markerRows.map((row) => <div className="marker-row" key={row[0]}><span className="marker-name"><i style={{ background: cellTypes.find((type) => type.name === row[0])?.color }} />{row[0]}</span><span className="marker-genes">{row[1]}</span><span className="score">{row[2]}</span><span className={`confidence ${row[3] === "高" ? "high" : "medium"}`}>{row[3]}</span></div>)}</div></section>
+              <section className="card markers-card"><div className="card-title-row"><div><span className="section-kicker">ANNOTATION EVIDENCE</span><h2>注释证据</h2></div><button className="text-link" onClick={() => selectPanel("markers")}>全部查看 →</button></div><div className="marker-table"><div className="marker-row header"><span>细胞类型</span><span>代表性 markers</span><span>评分</span><span /></div>{displayedMarkerRows.map((row, index) => <div className="marker-row" key={`${row.cluster || row.label}-${index}`}><span className="marker-name"><i style={{ background: cellTypes[index % cellTypes.length].color }} />{row.label}</span><span className="marker-genes">{row.markers}</span><span className="score">{row.score}</span><span className={`confidence ${row.confidence === "高" ? "high" : "medium"}`}>{row.confidence}</span></div>)}</div>{manualEditsEnabled && analysisResult?.annotationRows?.length ? <div className="manual-labels"><strong>手动修改 cluster 标签</strong><span>只修改网页显示标签；原始 AI 建议仍保留在证据表和分析报告中。</span>{analysisResult.annotationRows.map((row) => <label key={row.cluster}><span>Cluster {row.cluster}</span><input value={manualLabels[row.cluster] || row.celltype_major} onChange={(event) => updateManualLabel(row.cluster, event.target.value)} /></label>)}</div> : null}</section>
             </div>
           </div>
 

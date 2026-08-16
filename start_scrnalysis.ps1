@@ -16,4 +16,3 @@ if (-not $frontendListening) {
 Start-Sleep -Seconds 3
 Write-Host 'Scrnalysis 已启动。请打开 http://localhost:3000 或本机 IP:3000。'
 Write-Host '另一台电脑请使用运行 Scrnalysis 这台电脑的 IP 地址。'
-
